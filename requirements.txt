@@ -3,3 +3,5 @@ matplotlib
 scipy
 librosa
 numpy
+plotly
+pandas

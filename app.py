@@ -1,11 +1,11 @@
+import time
 import streamlit as st
 import librosa
+import io
+import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from audio_analysis import (compute_volume, compute_ste, compute_zcr, 
-                            compute_vstd, compute_vdr, compute_lster, 
-                            find_f0, compute_energy_entropy, compute_zstd, compute_hzcrr, 
-                            plot_feature, detect_silence, detect_music_speech)
+from audio_analysis import extract_audio_features, plot_feature, detect_silence, classify_voicing, detect_music
 
 st.markdown(
     """
@@ -23,283 +23,277 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# Tytuł aplikacji
-st.title("🎵 Analiza sygnału audio")
 
-# Wczytanie pliku audio
+st.title("Analiza sygnału audio")
+
 uploaded_file = st.file_uploader("Wybierz plik WAV", type=["wav"])
 
-
-# Przygotowanie zmiennej dla clip_duration
-clip_duration = None  # Definiujemy clip_duration poza warunkami
+clip_duration = None
+frame_size = None
+hop_length = None  
 
 if uploaded_file is not None:
-    # Dodanie opcji odtwarzania pliku audio
     st.audio(uploaded_file)
-    # Wczytanie pliku audio
     y, sr = librosa.load(uploaded_file, sr=None)
 
-    analysis_type = st.radio("Wybierz typ analizy:", ('Ramka', 'Klip'))
-
-    if analysis_type == 'Klip':
-        # Długość klipu
-        clip_duration = st.selectbox("Wybierz długość klipu:", ["1s", "2s", "3s", "4s"])
-        clip_duration = int(clip_duration[:-1])  # Usuń 's' i przekształć na int
-        frame_size = clip_duration * sr  # Długość ramki w próbkach (np. 1s, 2s, 3s, 4s)
-        hop_length = frame_size  # Przesunięcie ramki jest równe długości klipu
-    
-    elif analysis_type == 'Ramka':
-        # Długość ramki
-        frame_duration = st.selectbox("Wybierz długość ramki:", ["10ms", "20ms", "30ms", "40ms"])
-        frame_duration = int(frame_duration[:-2])  # Usuń 'ms' i przekształć na int
-        frame_size = int(frame_duration / 1000 * sr)  # Długość ramki w próbkach
-        hop_length = frame_size  # Przesunięcie ramki jest równe długości ramki
-
-    # Dodanie opcji detekcji ciszy
-    silence_detection = st.selectbox("Wybierz opcję detekcji ciszy:", ["Brak", "Detekcja ciszy"])
-
-    # Przygotowanie układu strony (szerokość)
-
-
-    # Tworzenie dwóch kolumn (lewa strona - interfejs, prawa strona - wykresy)
-    col1, col2 = st.columns([1, 3])  # Kolumna po lewej ma szerokość 1, po prawej 3
+    col1, col2 = st.columns([1, 3]) 
 
     with col1:
-        # Przyciski i opcje po lewej stronie
         st.write("### Opcje analizy:")
-        # Wybór analizy: klip czy ramka?
-        analysis_type = st.radio("Wybierz typ analizy:", ('Klip', 'Ramka'), key="analysis_type_key")
+        analysis_type = st.radio("Wybierz typ analizy:", ('Ramka', 'Klip'), key="analysis_type_key")
+        f0_method = "amdf"  
 
-        # Dodanie opcji detekcji ciszy
-        silence_detection = st.selectbox("Wybierz opcję detekcji ciszy:", ["Brak", "Detekcja ciszy"], key="silence_detection_key")
+        if analysis_type == "Ramka":
+            detection = st.selectbox("Wybierz opcję detekcji:", ["Brak", "Detekcja ciszy", "Dźwięczne / Bezdźwięczne"], key="detection_key")
+            f0_method = st.radio("Wybierz metodę wyznaczania f0:", ["AMDF", "Autokorelacja"], key="f0_method_key")
+            if f0_method == "AMDF":
+                f0_method = "amdf"
+            elif f0_method == "Autokorelacja":
+                f0_method = "autocorrelation"
 
-        # Wybór długości klipu lub ramki (jeśli dotyczy)
+        elif analysis_type == "Klip":
+            detection = st.selectbox("Wybierz opcję detekcji:", ["Brak", "Muzyka / Mowa"], key="detection_key")
+        
+        if detection == "Detekcja ciszy":
+            silence_zcr_threshold = st.slider("Wybierz próg dla ZCR:", min_value=0.0, max_value=0.1, step=0.0005, value=0.01, format="%0.3f")
+            silence_volume_threshold = st.slider("Wybierz próg dla Volume:", min_value=0.0, max_value=0.1, step=0.0005, value=0.003, format="%0.3f")
+
+        if detection == "Dźwięczne / Bezdźwięczne":
+            voicing_ste_threshold = st.slider("Wybierz próg dla STE:", min_value=0.0, max_value=0.05, step=0.0005, value=0.0005, format="%0.3f")
+            voicing_volume_threshold = st.slider("Wybierz próg dla Volume:", min_value=0.0, max_value=0.05, step=0.0005, value=0.005, format="%0.3f")
+
+        if detection == "Muzyka / Mowa":    
+            music_lster_threshold = st.slider("Wybierz próg dla LSTER:", min_value=0.0, max_value=1.0, step=0.005, value=0.5, format="%0.3f")
+            music_zstd_threshold = st.slider("Wybierz próg dla ZSTD:", min_value=0.0, max_value=0.5, step=0.005, value=0.15, format="%0.3f")
+
+
+        frame_duration = st.selectbox("Wybierz długość ramki:", ["10ms", "20ms", "30ms", "40ms"], key="frame_duration_2")
+        frame_duration = int(frame_duration[:-2])  
+
         if analysis_type == 'Klip':
-            clip_duration = st.selectbox("Wybierz długość klipu:", ["1s", "2s", "3s", "4s"], key="clip_duration_2")
-            clip_duration = int(clip_duration[:-1])  # Usuń 's' i przekształć na int
+            clip_duration = 1000
+            frame_size = clip_duration / 1000 * sr 
+            hop_length = frame_size 
         elif analysis_type == 'Ramka':
-            frame_duration = st.selectbox("Wybierz długość ramki:", ["10ms", "20ms", "30ms", "40ms"], key="frame_duration_2")
-            frame_duration = int(frame_duration[:-2])  # Usuń 'ms' i przekształć na int
+            frame_size = int(frame_duration / 1000 * sr)  
+            hop_length = frame_size  
+            
+        frame_features, clip_features = extract_audio_features(y, sr, hop_length, frame_size_ms=frame_duration, method=f0_method) 
 
     with col2:
-        # Dodanie wykresu przebiegu czasowego audio
         st.write("### Wykres przebiegu czasowego audio:")
         time_axis = np.linspace(0, len(y) / sr, len(y))
         fig = go.Figure()
 
-        # Dodanie podstawowego wykresu przebiegu czasowego
-        fig.add_trace(go.Scatter(x=time_axis, y=y, mode='lines', name="Przebieg czasowy"))
-
-        if silence_detection == "Detekcja ciszy":
-            # Wykrywanie ciszy
-            silence_flags = detect_silence(y, frame_size=frame_size, hop_length=hop_length)
-
-            # Zaznaczenie ciszy na wykresie
-            silence_start_times = [i * frame_size / sr for i, silent in enumerate(silence_flags) if silent]
-            silence_end_times = [(i + 1) * frame_size / sr for i, silent in enumerate(silence_flags) if silent]
-            y_min = min(y)
-            y_max = max(y)
-            
-            for start, end in zip(silence_start_times, silence_end_times):
-                # Zaznaczenie prostokątem wykrytych fragmentów ciszy
-                fig.add_trace(go.Scatter(
-                    x=[start, start, end, end], 
-                    y=[y_min, y_max, y_max, y_min],  # Ustalamy wartości Y tak, żeby prostokąt obejmował całą wysokość wykresu
-                    fill='toself',  # Wypełnienie prostokąta
-                    fillcolor='rgba(255, 0, 0, 0.3)',  # Kolor wypełnienia (czerwony, przezroczysty)
-                    line=dict(width=0),  # Brak konturu prostokąta
-                    showlegend=False,  # Usunięcie legendy
-                    mode='none',  # Usunięcie kropek i linii
-                    name="Cisza"
-                ))
-
+        fig.add_trace(go.Scatter(x=time_axis,
+                                y=y,
+                                mode='lines', 
+                                name="Przebieg czasowy", 
+                                hovertemplate="<b>Czas:</b> %{x:.3f} s" + "<br>" +
+                                            "<b>Amplituda:</b> %{y:.3f}" + "<extra></extra>", 
+        ))
         fig.update_layout(
-            title="Przebieg czasowy sygnału audio" if silence_detection == "Brak" else "Przebieg czasowy z detekcją ciszy",
+            title="Przebieg czasowy",
+            title_x=0.5,
             xaxis_title="Czas (s)",
             yaxis_title="Amplituda",
-            hovermode="closest"
+            hovermode="closest"  
         )
+
+        if detection == "Detekcja ciszy":
+
+            frame_features, clip_features = extract_audio_features(y, sr, hop_length, frame_size_ms=frame_duration, silence_zcr_threshold=silence_zcr_threshold, silence_volume_threshold=silence_volume_threshold)
+
+            silence_flags = frame_features['is_silence']  
+
+            silence_start_times = [min(i * frame_size / sr, len(y) / sr) for i, silent in enumerate(silence_flags) if silent]
+            silence_end_times = [min((i+1) * frame_size / sr, len(y) / sr) for i, silent in enumerate(silence_flags) if silent]
+            
+            y_min = min(y)
+            y_max = max(y)
+
+            for i, (start, end) in enumerate(zip(silence_start_times, silence_end_times)):
+                fig.add_trace(go.Scatter(
+                    x=[start, start, end, end],
+                    y=[y_min, y_max, y_max, y_min],
+                    fill='toself', 
+                    fillcolor='rgba(255, 0, 0, 0.3)',  
+                    line=dict(width=0),  
+                    showlegend=(i == 0),  
+                    legendgroup="Cisza", 
+                    mode='none', 
+                    name="Cisza", 
+                    hoverinfo="skip"
+                ))
+
+        if detection == "Dźwięczne / Bezdźwięczne":
+            frame_features, clip_features = extract_audio_features(y, sr, hop_length, frame_size_ms=frame_duration, voicing_ste_threshold=voicing_ste_threshold, voicing_volume_threshold=voicing_volume_threshold)
+
+            voicing_class = frame_features['is_voiced']
+
+            start_times = [min(i * frame_size / sr, len(y) / sr) for i, voiced in enumerate(voicing_class)]
+            end_times = [min((i+1) * frame_size / sr, len(y) / sr) for i, voiced in enumerate(voicing_class)]
+            
+            y_min = min(y)
+            y_max = max(y)
+
+            dźwięczne_legend_added = False
+            bezdźwięczne_legend_added = False
+
+            for i, (start, end, is_voiced) in enumerate(zip(start_times, end_times, voicing_class)):
+                if is_voiced:
+                    fillcolor = 'rgba(0, 255, 0, 0.3)'
+                    label = "Dźwięczne"
+                    legendgroup = "Dźwięczne"
+
+                    show_legend = not dźwięczne_legend_added
+                    if not dźwięczne_legend_added:
+                        dźwięczne_legend_added = True
+
+                else:
+                    fillcolor = 'rgba(255, 0, 0, 0.3)' 
+                    label = "Bezdźwięczne"
+                    legendgroup = "Bezdźwięczne"  
+
+                    show_legend = not bezdźwięczne_legend_added
+                    if not bezdźwięczne_legend_added:
+                        bezdźwięczne_legend_added = True
+
+                fig.add_trace(go.Scatter(
+                    x=[start, start, end, end], 
+                    y=[y_min, y_max, y_max, y_min],  
+                    fill='toself', 
+                    fillcolor=fillcolor, 
+                    line=dict(width=0),
+                    showlegend=show_legend, 
+                    legendgroup=legendgroup, 
+                    mode='none', 
+                    name=label  
+                ))
+
+
+        if detection == "Muzyka / Mowa":
+            frame_features, clip_features = extract_audio_features(y, sr, hop_length, frame_size_ms=frame_duration, music_lster_threshold=music_lster_threshold, music_zstd_threshold=music_zstd_threshold)
+
+            music_flags = clip_features['is_music']
+
+            start_times = [min(i * frame_size / sr, len(y) / sr) for i, music in enumerate(music_flags)]
+            end_times = [min((i + 1) * frame_size / sr, len(y) / sr) for i, music in enumerate(music_flags)]
+            
+            y_min = min(y)
+            y_max = max(y)
+
+            muzyka_legend_added = False
+            mowa_legend_added = False
+
+            for i, (start, end, is_music) in enumerate(zip(start_times, end_times, music_flags)):
+                if is_music:
+                    fillcolor = 'rgba(0, 255, 0, 0.3)' 
+                    label = "Muzyka"
+                    legendgroup = "Muzyka"  
+
+                    show_legend = not muzyka_legend_added
+                    if not muzyka_legend_added:
+                        muzyka_legend_added = True
+
+                else:
+                    fillcolor = 'rgba(255, 0, 0, 0.3)'
+                    label = "Mowa"
+                    legendgroup = "Mowa"  
+
+                    show_legend = not mowa_legend_added
+                    if not mowa_legend_added:
+                        mowa_legend_added = True
+
+                fig.add_trace(go.Scatter(
+                    x=[start, start, end, end], 
+                    y=[y_min, y_max, y_max, y_min], 
+                    fill='toself', 
+                    fillcolor=fillcolor, 
+                    line=dict(width=0), 
+                    showlegend=show_legend,
+                    legendgroup=legendgroup,
+                    mode='none', 
+                    name=label, 
+                    hoverinfo="skip"
+                ))
+
+
+        fig.update_layout(
+            title="Przebieg czasowy sygnału audio",
+            xaxis_title="Czas (s)",
+            yaxis_title="Amplituda",
+            hovermode="closest",
+        )
+
         st.plotly_chart(fig, use_container_width=True)
 
 
-        # Wybór analizy: klip czy ramka?
-        if analysis_type == 'Klip':
+    if analysis_type == 'Klip':
+        st.write("### Analiza na poziomie klipu:")
+        frame_size = clip_duration * sr 
+        hop_length = frame_size  
 
-            # Obliczenia cech na poziomie klipu
-            st.write("### Analiza na poziomie klipu:")
-            frame_size = clip_duration * sr  # Długość ramki w próbkach (np. 1s, 2s, 3s, 4s)
-            hop_length = frame_size  # Przesunięcie ramki jest równe długości klipu
+        features = [
+            ('VSTD', clip_features['vstd']),
+            ('VDR', clip_features['vdr']),
+            ('LSTER', clip_features['lster']),
+            ('Entropy', clip_features['energy_entropy']),
+            ('ZSTD', clip_features['zstd'])
+        ]
 
-            # Obliczanie cech
-            vstd = compute_vstd(y, frame_size, hop_length)
-            vdr = compute_vdr(y, frame_size, hop_length)
-            lster = compute_lster(y, frame_size, hop_length)
-            entropy = compute_energy_entropy(y, frame_size, hop_length)
-            zstd = compute_zstd(y, frame_size, hop_length)
-            hzcrr = compute_hzcrr(y, frame_size, hop_length)
-
-            # Wykresy dla cech na poziomie klipu
-            col1, col2, col3, col4, col5= st.columns(5)  # Sześć wykresów w poziomie
-
-            with col1:
-                st.plotly_chart(plot_feature(y, sr, vstd, "VSTD", frame_size, hop_length), use_container_width=True)
-
-            with col2:
-                st.plotly_chart(plot_feature(y, sr, vdr, "VDR", frame_size, hop_length), use_container_width=True)
-
-            with col3:
-                st.plotly_chart(plot_feature(y, sr, lster, "LSTER", frame_size, hop_length), use_container_width=True)
-
-            with col4:
-                st.plotly_chart(plot_feature(y, sr, entropy, "Entropy", frame_size, hop_length), use_container_width=True)
-
-            with col5:
-                st.plotly_chart(plot_feature(y, sr, zstd, "ZSTD", frame_size, hop_length), use_container_width=True)
-
-        elif analysis_type == 'Ramka':
-            # Obliczenie cech na poziomie ramki
-            st.write("### Analiza na poziomie ramki:")
-            volumes = compute_volume(y, frame_size, hop_length)
-            ste = compute_ste(y, frame_size, hop_length)
-            zcr = compute_zcr(y, frame_size, hop_length)
-            f0 = find_f0(y, frame_size, hop_length)
-
-            # Wykresy dla cech na poziomie ramki
-            col1, col2, col3, col4 = st.columns(4)  # Cztery wykresy w poziomie
-
-            with col1:
-                st.plotly_chart(plot_feature(y, sr, volumes, "Volume", frame_size, hop_length), use_container_width=True)
-
-            with col2:
-                st.plotly_chart(plot_feature(y, sr, ste, "Short Time Energy (STE)", frame_size, hop_length), use_container_width=True)
-
-            with col3:
-                st.plotly_chart(plot_feature(y, sr, zcr, "Zero Crossing Rate (ZCR)", frame_size, hop_length), use_container_width=True)
-
-            with col4:
-                st.plotly_chart(plot_feature(y, sr, f0, "Fundamental Frequency (F0)", frame_size, hop_length), use_container_width=True)
-
-
-# import streamlit as st
-# import librosa
-# import numpy as np
-# import plotly.graph_objects as go
-# from audio_analysis import (compute_volume, compute_ste, compute_zcr, 
-#                             compute_vstd, compute_vdr, compute_lster, 
-#                             plot_feature, detect_silence)
-
-# # Tytuł aplikacji
-# st.title("🎵 Analiza sygnału audio")
-
-# # Wczytanie pliku audio
-# uploaded_file = st.file_uploader("Wybierz plik WAV", type=["wav"])
-
-# if uploaded_file is not None:
-#     # Wczytanie pliku audio
-#     y, sr = librosa.load(uploaded_file, sr=None)
-
-#     analysis_type = st.radio("Wybierz typ analizy:", ('Ramka', 'Klip'))
-
-#     if analysis_type == 'Klip':
-#         # Długość klipu
-#         clip_duration = st.selectbox("Wybierz długość klipu:", ["1s", "2s", "3s", "4s"])
-#         clip_duration = int(clip_duration[:-1])  # Usuń 's' i przekształć na int
-#         frame_size = clip_duration * sr  # Długość ramki w próbkach (np. 1s, 2s, 3s, 4s)
-#         hop_length = frame_size  # Przesunięcie ramki jest równe długości klipu
-    
-#     elif analysis_type == 'Ramka':
-#         # Długość ramki
-#         frame_duration = st.selectbox("Wybierz długość ramki:", ["10ms", "20ms", "30ms", "40ms"])
-#         frame_duration = int(frame_duration[:-2])  # Usuń 'ms' i przekształć na int
-#         frame_size = int(frame_duration / 1000 * sr)  # Długość ramki w próbkach
-#         hop_length = frame_size  # Przesunięcie ramki jest równe długości ramki
-
-#     # Dodanie opcji detekcji ciszy
-#     silence_detection = st.selectbox("Wybierz opcję detekcji ciszy:", ["Brak", "Detekcja ciszy"])
-
-#     # Dodanie wykresu przebiegu czasowego audio
-#     st.write("### Wykres przebiegu czasowego audio:")
-#     time_axis = np.linspace(0, len(y) / sr, len(y))
-#     fig = go.Figure()
-
-#     # Dodanie podstawowego wykresu przebiegu czasowego
-#     fig.add_trace(go.Scatter(x=time_axis, y=y, mode='lines', name="Przebieg czasowy"))
-
-#     if silence_detection == "Detekcja ciszy":
-#         # Wykrywanie ciszy
-#         silence_flags = detect_silence(y, frame_size=frame_size, hop_length=hop_length)
-
-#         # Zaznaczenie ciszy na wykresie
-#         silence_start_times = [i * frame_size / sr for i, silent in enumerate(silence_flags) if silent]
-#         silence_end_times = [(i + 1) * frame_size / sr for i, silent in enumerate(silence_flags) if silent]
-#         y_min = min(y)
-#         y_max = max(y)
+        num_features = len(features)
         
-#         for start, end in zip(silence_start_times, silence_end_times):
-#     # Zaznaczenie prostokątem wykrytych fragmentów ciszy
-#             fig.add_trace(go.Scatter(
-#                 x=[start, start, end, end], 
-#                 y=[y_min, y_max, y_max, y_min],  # Ustalamy wartości Y tak, żeby prostokąt obejmował całą wysokość wykresu
-#                 fill='toself',  # Wypełnienie prostokąta
-#                 fillcolor='rgba(255, 0, 0, 0.3)',  # Kolor wypełnienia (czerwony, przezroczysty)
-#                 line=dict(width=0),  # Brak konturu prostokąta
-#                 showlegend=False,  # Usunięcie legendy
-#                 mode='none',  # Usunięcie kropek i linii
-#                 name="Cisza"
-#             ))
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(plot_feature(y, sr, features[0][1], features[0][0], "klip"), use_container_width=True)
+        with col2:
+            st.plotly_chart(plot_feature(y, sr, features[1][1], features[1][0], "klip"), use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(plot_feature(y, sr, features[2][1], features[2][0], "klip"), use_container_width=True)
+        with col4:
+            st.plotly_chart(plot_feature(y, sr, features[3][1], features[3][0], "klip"), use_container_width=True)
+
+        if num_features % 2 != 0:
+            col5, col6, col7 = st.columns([1, 2, 1]) 
+            with col6:  
+                st.plotly_chart(plot_feature(y, sr, features[4][1], features[4][0], "klip"), use_container_width=True)
 
 
-#     fig.update_layout(
-#         title="Przebieg czasowy sygnału audio" if silence_detection == "Brak" else "Przebieg czasowy z detekcją ciszy",
-#         xaxis_title="Czas (s)",
-#         yaxis_title="Amplituda",
-#         hovermode="closest"
-#     )
-#     st.plotly_chart(fig, use_container_width=True)
 
-#     # Dodanie opcji odtwarzania pliku audio
-#     st.audio(uploaded_file)
+    elif analysis_type == 'Ramka':
+        st.write("### Analiza na poziomie ramki:")
 
-#     # Wybór analizy: klip czy ramka?
-#     analysis_type = st.radio("Wybierz typ analizy:", ('Klip', 'Ramka'))
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(plot_feature(y, sr, frame_features['volume'], "Volume", "ramka"), use_container_width=True)
+        with col2:
+            st.plotly_chart(plot_feature(y, sr, frame_features['ste'], "STE", "ramka"), use_container_width=True)
 
-#     if analysis_type == 'Klip':
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(plot_feature(y, sr, frame_features['zcr'], "ZCR", "ramka"), use_container_width=True)
+        with col4:
+            st.plotly_chart(plot_feature(y, sr, frame_features['f0'], "f0", "ramka"), use_container_width=True)
 
-#         # Obliczenie cech na poziomie klipu
-#         st.write("### Analiza na poziomie klipu:")
-#         frame_size = clip_duration * sr  # Długość ramki w próbkach (np. 1s, 2s, 3s, 4s)
-#         hop_length = frame_size  # Przesunięcie ramki jest równe długości klipu
 
-#         volumes = compute_volume(y, frame_size, hop_length)
-#         ste = compute_ste(y, frame_size, hop_length)
-#         zcr = compute_zcr(y, frame_size, hop_length)
+    if analysis_type == 'Klip':
+        df = pd.DataFrame(clip_features)
+    else: 
+        df = pd.DataFrame(frame_features)
 
-#         # Wykresy dla głośności, STE, ZCR na poziomie klipu
-#         st.plotly_chart(plot_feature(y, sr, volumes, "Volume", frame_size, hop_length), use_container_width=True)
-#         st.plotly_chart(plot_feature(y, sr, ste, "Short Time Energy (STE)", frame_size, hop_length), use_container_width=True)
-#         st.plotly_chart(plot_feature(y, sr, zcr, "Zero Crossing Rate (ZCR)", frame_size, hop_length), use_container_width=True)
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_data = csv_buffer.getvalue()
 
-#         # Obliczenia cech na poziomie klipu
-#         vstd = compute_vstd(volumes)
-#         vdr = compute_vdr(volumes)
-#         lster = compute_lster(ste, frame_size, hop_length)
+    st.write("### Podgląd danych CSV:")
+    st.dataframe(df.head(5))
 
-#         # Wyświetlanie wyników dla klipu
-#         st.write(f"VSTD (Volume Standard Deviation): {vstd:.4f}")
-#         st.write(f"VDR (Volume Dynamic Range): {vdr:.4f}")
-#         st.write(f"LSTER (Low Short Time Energy Ratio): {lster:.4f}")
-
-#     elif analysis_type == 'Ramka':
-#         frame_size = int(frame_duration / 1000 * sr)  # Długość ramki w próbkach
-#         hop_length = frame_size  # Przesunięcie ramki jest równe długości ramki
-
-#         # Obliczenie cech na poziomie ramki
-#         st.write("### Analiza na poziomie ramki:")
-#         volumes = compute_volume(y, frame_size, hop_length)
-#         ste = compute_ste(y, frame_size, hop_length)
-#         zcr = compute_zcr(y, frame_size, hop_length)
-
-#         # Wykresy dla głośności, STE, ZCR na poziomie ramki
-#         st.plotly_chart(plot_feature(y, sr, volumes, "Volume", frame_size, hop_length), use_container_width=True)
-#         st.plotly_chart(plot_feature(y, sr, ste, "Short Time Energy (STE)", frame_size, hop_length), use_container_width=True)
-#         st.plotly_chart(plot_feature(y, sr, zcr, "Zero Crossing Rate (ZCR)", frame_size, hop_length), use_container_width=True)
+    st.download_button(
+        label="📥 Pobierz CSV",
+        data=csv_data,
+        file_name="audio_analysis.csv",
+        mime="text/csv"
+)
