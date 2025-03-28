@@ -1,6 +1,6 @@
 ## Aplikacja do Analizy Dźwięku  
 
-Aplikacja umożliwia analizę plików audio w formacie WAV, obliczanie oraz wizualizację kluczowych parametrów akustycznych, zarówno na poziomie **ramki**, jak i **całego klipu**.
+Aplikacja umożliwia analizę plików audio w formacie WAV, obliczanie oraz wizualizację kluczowych parametrów akustycznych, zarówno na poziomie ramki, jak i całego klipu.
 
 ### Funkcje  
 - **Wizualizacja podstawowych parametrów akustycznych** – Możliwość wizualizacji parametrów audio zarówno dla pojedynczej ramki, jak i całego klipu.  
